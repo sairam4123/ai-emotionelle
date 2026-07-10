@@ -117,7 +117,7 @@ def main():
             model=MODEL,
             contents=[
                 emotion_detector_prompt.format(state=state),
-                # internal_monologue_res.text,
+                internal_monologue_res.text,
                 # reflective_res.text,
                 f"User input: {user_input}",
             ],

@@ -6,7 +6,7 @@ A command-line chat agent ("Alpha0") that simulates emotionally-driven, human-li
 
 Each turn runs through three model calls:
 
-1. **Internal monologue** — a stream-of-consciousness reflection on the user's input, colored by the agent's current emotional state.
+1. **Internal monologue** — a stream-of-consciousness reflection on the user's input, colored by the agent's current emotional state. Generated silently; not printed to the console.
 2. **Emotion detector** — reads the internal monologue and decides whether the emotional state should shift, calling the `adjust_emotion` function tool to update it (state changes are subtle, and `neutral` is not a valid state).
 3. **Response generation** — Alpha0 replies to the user, informed by its internal monologue and current emotional state.
 
