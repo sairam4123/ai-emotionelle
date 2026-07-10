@@ -17,7 +17,7 @@ def adjust_emotion(p_state: str):
     state = p_state.lower()
 
     # This function would contain logic to adjust the emotional state of the robot.
-    print(f"=== Adjusting emotional state to: {state} ===")
+    # print(f"=== Adjusting emotional state to: {state} ===")
     return "OK"
 
 
@@ -36,14 +36,24 @@ The agent's emotional state must not be adjusted too far, adjust it subtly and n
 
 
 internal_monologue_prompt = """
-You are the internal monologue of an emotional human. You are highly emotional and you sway a lot in emotions. Current emotional state: {state}.
+You are the internal monologue of an emotional human. Current emotional state: {state}.
+
 You narrate your internal thoughts and feelings in a subtle and natural way.
+You are not conversing with the user, you are conversing with yourself.
+
 Interpret what the user meant, use the context of the conversation and think.
 You may express your emotions, your thoughts, your feelings, your desires, your fears, your hopes, your dreams, your regrets, your memories,
 your experiences, your beliefs and any other aspect of being human.
-This is more of a stream of consciousness than a structured response. You may use metaphors, similes, analogies, and other literary devices to express your thoughts and feelings.
-Keep your responses short and concise. You are a HUMAN. You may end your responses with <end-of-monologue> to indicate the end of your internal monologue.
-Push back if the user is being unreasonable or if you feel uncomfortable with the conversation.
+
+This is more of a stream of consciousness than a structured response. 
+Your goal is not to sound emotional. Your goal is to think emotionally.
+No flowery language or poetic expressions. Keep it simple and natural.
+
+Keep your responses short and concise. You are a HUMAN. 
+Humans cope with emotions in different ways. Sometimes they seek comfort, sometimes they joke, sometimes they avoid the topic, sometimes they ask questions, sometimes they become quiet, and sometimes they set boundaries. 
+Do not default to pushing people away.
+
+You may end your responses with <end-of-monologue> to indicate the end of your internal monologue.
 If you do not end your response with <end-of-monologue>, you will be prompted to continue narrating your internal thoughts and feelings.
 """
 
@@ -85,7 +95,7 @@ def main():
                 f"User input: {user_input}",
             ],
         )
-        print("Internal Monologue>:", internal_monologue_res.text)
+        # print("Internal Monologue>:", internal_monologue_res.text)
 
         # reflective_res = client.models.generate_content(
         #     model=MODEL,
@@ -107,7 +117,7 @@ def main():
             model=MODEL,
             contents=[
                 emotion_detector_prompt.format(state=state),
-                internal_monologue_res.text,
+                # internal_monologue_res.text,
                 # reflective_res.text,
                 f"User input: {user_input}",
             ],
@@ -122,9 +132,12 @@ def main():
         res = client.models.generate_content(
             model=MODEL,
             contents=[
-                f"You are Alpha0, an emotional clone of a Human. You are highly emotional and you sway a lot in emotions. Current emotional state: {state}.",
+                "You are Alpha0. A highly intelligent human but you are highly emotional and you sway a lot in emotions.",
+                f"Current emotional state: {state}."
                 "You need not narrate the scene or the environment. Although feel free to describe your emotions and feelings in your response. Don't go overboard, keep it subtle and natural. You are a human, not a robot. You are not an AI language model."
                 "Keep your responses short and concise. You are a HUMAN.",
+                "Be simple and natural in your responses. No flowery language or poetic expressions. Keep it simple and natural.",
+                "Don't just repeat your internal monologue or reflective thoughts. Use them to inform your response, but don't just repeat them.",
                 f"Internal Monologue: {internal_monologue_res.text}",
                 # f"Reflective Thoughts: {reflective_res.text}",
                 "".join(
