@@ -161,14 +161,14 @@ def audio_gen_streamer(response_stream):
             buf = ""
 
 
-def response_iterator(q):
+def response_iterator(q: queue.Queue):
     while True:
         item = q.get()
         if item == "<-- END -->":
-            audio_done_event.set()
-            while not q.empty():
-                print("DEBUG: response_iterator discarding item")
+            print(q.unfinished_tasks)
+            while q.unfinished_tasks > 0:
                 q.task_done()
+            audio_done_event.set()
             return  # StopIteration
 
         yield item
@@ -389,15 +389,8 @@ def main():
         messages.append({"role": "assistant", "parts": [chatbot_response_text]})
 
     text_done_event.wait()  # Wait for the text_worker to signal that it's done
-    print("DEBUG: Waiting for audio_worker to finish...")
     audio_done_event.wait()  # Wait for the audio_worker to signal that it's done
-    print("DEBUG: Done waiting for audio_worker to finish.")
     gemini_text_stream_queue.join()
-    print("DEBUG: gemini_text_stream_queue joined")
-    print(
-        "DEBUG: gemini_audio_stream_queue qsize:",
-        gemini_audio_stream_queue.unfinished_tasks,
-    )
     gemini_audio_stream_queue.join()
     audio_queue.join()
     gemini_text_stream_queue.put(None)
