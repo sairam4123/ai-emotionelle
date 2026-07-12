@@ -1,11 +1,43 @@
+import io
+import itertools
+import queue
+import threading
+import time
+
 from google import genai
+from google.cloud import texttospeech as tts
 from dotenv import load_dotenv
+import pydub
+import pydub.playback
+import sounddevice as sd
 
 load_dotenv()
 
 MODEL = "gemini-3.1-flash-lite"
 
-state = "cheerful"
+state = "romantic"
+
+PREFERRED = [
+    "Windows WASAPI",
+    "Windows DirectSound",
+    "MME",
+]
+
+apis = sd.query_hostapis()
+
+for backend in PREFERRED:
+    api = next((a for a in apis if a["name"] == backend), None)
+    if api and api["default_output_device"] != -1:
+        device = api["default_output_device"]
+        break
+else:
+    raise RuntimeError("No suitable audio backend")
+
+
+selected_device = sd.query_devices(device)
+
+
+print(f"Selected output device: {selected_device['name']} (Index: {device})")
 
 
 def adjust_emotion(p_state: str):
@@ -49,6 +81,8 @@ This is more of a stream of consciousness than a structured response.
 Your goal is not to sound emotional. Your goal is to think emotionally.
 No flowery language or poetic expressions. Keep it simple and natural.
 
+Don't overthink, keep things simple and natural. 
+
 Keep your responses short and concise. You are a HUMAN. 
 Humans cope with emotions in different ways. Sometimes they seek comfort, sometimes they joke, sometimes they avoid the topic, sometimes they ask questions, sometimes they become quiet, and sometimes they set boundaries. 
 Do not default to pushing people away.
@@ -64,15 +98,173 @@ Keep it concise and short. You are a HUMAN. You may end your responses with <end
 """
 
 
+def get_google_creds():
+    import json
+
+    with open("gen-lang-client.json", "r") as f:
+        creds = json.load(f)
+    return creds
+
+
+gemini_text_stream_queue = queue.Queue(maxsize=5)
+gemini_audio_stream_queue = queue.Queue(maxsize=5)
+audio_queue = queue.Queue(maxsize=20)
+
+text_done_event = threading.Event()
+audio_done_event = threading.Event()
+
+
+def text_worker():
+    while True:
+        chunk = gemini_text_stream_queue.get()
+        if chunk is None:
+            break
+        if chunk == "<-- BEGIN -->":
+            text_done_event.clear()
+            print("\x1b[1;95;49mAlpha0>:\x1b[0;95;49m", end=" ", flush=True)
+            gemini_text_stream_queue.task_done()
+            continue
+        if chunk == "<-- END -->":
+            print("\x1b[0;0;0m")  # New line after the AI response
+            gemini_text_stream_queue.task_done()
+            text_done_event.set()
+            continue
+        if chunk.text:
+            print(chunk.text, end="", flush=True)
+        time.sleep(0.10)
+        gemini_text_stream_queue.task_done()
+
+
+tts_client = tts.TextToSpeechClient.from_service_account_json("gen-lang-client.json")
+
+
+def audio_gen_streamer(response_stream):
+    yield tts.StreamingSynthesizeRequest(
+        streaming_config=tts.StreamingSynthesizeConfig(
+            voice=tts.VoiceSelectionParams(
+                language_code="en-IN", name="en-IN-Chirp3-HD-Achernar"
+            ),
+            streaming_audio_config=tts.StreamingAudioConfig(
+                audio_encoding=tts.AudioEncoding.PCM,
+                sample_rate_hertz=24000,
+            ),
+        )
+    )
+    buf = ""
+    for chunk in response_stream:
+        chunk_text = chunk.text if chunk else ""
+        buf += chunk_text
+        if len(buf) > 10 or chunk_text.endswith((".", "!", "?")):
+            yield tts.StreamingSynthesizeRequest(
+                input=tts.StreamingSynthesisInput(text=buf)
+            )
+            buf = ""
+
+
+def response_iterator(q):
+    while True:
+        item = q.get()
+        if item == "<-- END -->":
+            audio_done_event.set()
+            while not q.empty():
+                print("DEBUG: response_iterator discarding item")
+                q.task_done()
+            return  # StopIteration
+
+        yield item
+
+
+def audio_worker():
+
+    while True:
+        chunk = gemini_audio_stream_queue.get()
+        if chunk is None:
+            break
+
+        if chunk != "<-- BEGIN -->":
+            continue
+            # create a iterator for
+        audio_queue.put(b"")  # Put an empty chunk to signal the start of audio playback
+        # Begin chunks enter
+        stream = response_iterator(gemini_audio_stream_queue)
+        audio_res = tts_client.streaming_synthesize(audio_gen_streamer(stream))
+        for audio_chunk in audio_res:
+            if audio_chunk.audio_content:
+                audio_segment = pydub.AudioSegment.from_raw(
+                    io.BytesIO(audio_chunk.audio_content),
+                    sample_width=2,
+                    frame_rate=24000,
+                    channels=1,
+                )
+                audio_segment = audio_segment.set_frame_rate(48000).set_channels(2)
+                audio_queue.put(audio_segment.raw_data)
+                # print(
+                #     "\nDEBUG: audio_worker send audio qsize:",
+                #     audio_queue.qsize(),
+                #     "size: ",
+                #     len(audio_chunk.audio_content),
+                # )
+        # gemini_audio_stream_queue.task_done()
+
+
+def playback_worker():
+
+    # Open the stream context ONCE
+    with sd.RawOutputStream(
+        device=device,
+        samplerate=48000,
+        channels=2,
+        dtype="int16",
+        latency="high",
+        blocksize=4096,
+    ) as stream:
+        # buff = []
+        # with open("output.wav", "wb") as stream:
+        while True:
+            chunk = audio_queue.get()
+            if chunk is None:
+                break
+            # buff.append(chunk)
+            # print("\nDEBUG: playback_worker got chunk, qsize:", audio_queue.qsize())
+            # if len(buff) < 5:
+            #     continue
+            # chunk = b"".join(buff)
+            # buff.clear()
+            # This writes to the buffer and waits only if the buffer is full
+            stream.write(chunk)
+            audio_queue.task_done()
+
+
 def main():
     client = genai.Client()
-
+    print(
+        "\x1b[1;37;49m=============================================================\x1b[0;0;0m"
+    )
+    print(
+        "\x1b[1;37;49mWelcome to the Emotional AI Chat! Type your messages below. Press Ctrl+C to exit.\x1b[0;0;0m"
+    )
+    print(
+        "\x1b[1;37;49m=============================================================\x1b[0;0;0m"
+    )
+    print()
+    print("\x1b[1;37;49mYou are now chatting with \x1b[1;95;49mAlpha0\x1b[0;0;0m")
+    print()
     messages = []
+
+    text_thread = threading.Thread(target=text_worker, daemon=True)
+    text_thread.start()
+    audio_thread = threading.Thread(target=audio_worker, daemon=True)
+    audio_thread.start()
+    worker_thread = threading.Thread(target=playback_worker, daemon=True)
+    worker_thread.start()
 
     user_exit = False
     while not user_exit:
+        text_done_event.clear()
+        audio_done_event.clear()
+
         try:
-            user_input = input("You>: ")
+            user_input = input("\x1b[1;37;49mYou>:\x1b[0;0;0m ")
         except KeyboardInterrupt:
             user_input = "I'm exiting the chat. Goodbye!"
             print(user_input)
@@ -82,7 +274,7 @@ def main():
 
         internal_monologue = internal_monologue_prompt.format(state=state)
 
-        internal_monologue_res = client.models.generate_content(
+        internal_monologue_res = client.models.generate_content_stream(
             model=MODEL,
             contents=[
                 internal_monologue,
@@ -95,6 +287,17 @@ def main():
                 f"User input: {user_input}",
             ],
         )
+        monologue_text = ""
+        print("   \x1b[0;3;90m", end=" ", flush=True)
+        for chunk in internal_monologue_res:
+            if chunk.text:
+                chunk_text = chunk.text.strip().replace("<end-of-monologue>", "")
+                print(chunk.text, end="", flush=True)
+                monologue_text += chunk_text
+                time.sleep(0.10)  # Simulate a typing effect for the internal monologue
+        monologue_text = monologue_text.strip().replace("<end-of-monologue>", "")
+
+        print("\x1b[0;0;0;0m")  # New line after the internal monologue
         # print("Internal Monologue>:", internal_monologue_res.text)
 
         # reflective_res = client.models.generate_content(
@@ -117,7 +320,7 @@ def main():
             model=MODEL,
             contents=[
                 emotion_detector_prompt.format(state=state),
-                internal_monologue_res.text,
+                monologue_text,
                 # reflective_res.text,
                 f"User input: {user_input}",
             ],
@@ -129,16 +332,16 @@ def main():
         if emotion_res and emotion_res.text != "OK":
             print("Emotion Detector>:", emotion_res.text)
 
-        res = client.models.generate_content(
+        res = client.models.generate_content_stream(
             model=MODEL,
             contents=[
-                "You are Alpha0. A highly intelligent human but you are highly emotional and you sway a lot in emotions.",
+                "You are Alpha0. A highly intelligent human working at a software company. Aged 20.",
                 f"Current emotional state: {state}."
-                "You need not narrate the scene or the environment. Although feel free to describe your emotions and feelings in your response. Don't go overboard, keep it subtle and natural. You are a human, not a robot. You are not an AI language model."
+                "You need not narrate the scene or the environment. Keep it subtle and natural. You are a human, not a robot. You are not an AI language model."
                 "Keep your responses short and concise. You are a HUMAN.",
                 "Be simple and natural in your responses. No flowery language or poetic expressions. Keep it simple and natural.",
-                "Don't just repeat your internal monologue or reflective thoughts. Use them to inform your response, but don't just repeat them.",
-                f"Internal Monologue: {internal_monologue_res.text}",
+                "Don't just repeat your internal monologue. Use them to inform your response, but don't just repeat them. You are chatting so keep your responses conversational and concise. This is the user facing response, keep it concise.",
+                f"Internal Monologue: {monologue_text}",
                 # f"Reflective Thoughts: {reflective_res.text}",
                 "".join(
                     [
@@ -149,8 +352,63 @@ def main():
                 f"User input: {user_input}",
             ],
         )
-        messages.append({"role": "assistant", "parts": [res.text]})
-        print("AI>:", res.text)
+        chatbot_response_text = ""
+
+        gemini_text_stream_queue.put("<-- BEGIN -->")
+        gemini_audio_stream_queue.put("<-- BEGIN -->")
+        for chunk in res:
+            if chunk.text:
+                chunk_text = chunk.text
+                chatbot_response_text += chunk_text
+                gemini_text_stream_queue.put(chunk)
+                gemini_audio_stream_queue.put(chunk)
+        gemini_text_stream_queue.put("<-- END -->")
+        gemini_audio_stream_queue.put("<-- END -->")
+        text_done_event.wait()  # Wait for the text_worker to signal that it's done
+        audio_done_event.wait()  # Wait for the audio_worker to signal that it's done
+
+        # text_stream, audio_stream = itertools.tee(res, 2)
+        # gemini_text_stream_queue.put(text_stream)
+        # gemini_audio_stream_queue.put(audio_stream)
+
+        # print("\x1b[1;95;49mAlpha0>:\x1b[0;95;49m", end=" ", flush=True)
+        # for chunk in text_stream:
+        #     if chunk.text:
+        #         chunk_text = chunk.text
+        #         print(chunk_text, end="", flush=True)
+        #         chatbot_response_text += chunk_text
+        #         time.sleep(0.10)  # Simulate a typing effect for the AI response
+        # print("\x1b[0;0;0m")  # New line after
+
+        # with io.BytesIO() as f:
+        #     f.write(audio_res.audio_content)
+        #     f.seek(0)
+        #     seg = pydub.AudioSegment.from_file(f, format="mp3")
+        #     pydub.playback.play(seg)
+
+        messages.append({"role": "assistant", "parts": [chatbot_response_text]})
+
+    text_done_event.wait()  # Wait for the text_worker to signal that it's done
+    print("DEBUG: Waiting for audio_worker to finish...")
+    audio_done_event.wait()  # Wait for the audio_worker to signal that it's done
+    print("DEBUG: Done waiting for audio_worker to finish.")
+    gemini_text_stream_queue.join()
+    print("DEBUG: gemini_text_stream_queue joined")
+    print(
+        "DEBUG: gemini_audio_stream_queue qsize:",
+        gemini_audio_stream_queue.unfinished_tasks,
+    )
+    gemini_audio_stream_queue.join()
+    audio_queue.join()
+    gemini_text_stream_queue.put(None)
+    gemini_audio_stream_queue.put(None)
+    audio_queue.put(None)
+    text_thread.join()
+    audio_thread.join()
+    worker_thread.join()
+    print("\n")
+    print("\x1b[1;37;49mThank you for chatting with Alpha0! Goodbye!\x1b[0;0;0m")
+    print("\n")
 
 
 if __name__ == "__main__":
