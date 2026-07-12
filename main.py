@@ -152,6 +152,12 @@ def audio_gen_streamer(response_stream):
     )
     buf = ""
     for chunk in response_stream:
+        if chunk == "<-- END -->":
+            if buf:
+                yield tts.StreamingSynthesizeRequest(
+                    input=tts.StreamingSynthesisInput(text=buf)
+                )
+            return  # StopIteration
         chunk_text = chunk.text if chunk else ""
         buf += chunk_text
         if len(buf) > 10 or chunk_text.endswith((".", "!", "?")):
@@ -165,11 +171,13 @@ def response_iterator(q: queue.Queue):
     while True:
         item = q.get()
         if item == "<-- END -->":
-            print(q.unfinished_tasks)
-            while q.unfinished_tasks > 0:
-                q.task_done()
-            audio_done_event.set()
+            yield item
             return  # StopIteration
+        # if item == "<-- END -->":
+        #     while q.unfinished_tasks > 0:
+        #         q.task_done()
+        #     audio_done_event.set()
+        #     return  # StopIteration
 
         yield item
 
@@ -185,6 +193,10 @@ def audio_worker():
             continue
             # create a iterator for
         audio_queue.put(b"")  # Put an empty chunk to signal the start of audio playback
+        audio_queue.put(b"")
+        audio_queue.put(b"")
+        audio_queue.put(b"")
+        audio_queue.put(b"")
         # Begin chunks enter
         stream = response_iterator(gemini_audio_stream_queue)
         audio_res = tts_client.streaming_synthesize(audio_gen_streamer(stream))
@@ -203,8 +215,12 @@ def audio_worker():
                 #     audio_queue.qsize(),
                 #     "size: ",
                 #     len(audio_chunk.audio_content),
-                # )
-        # gemini_audio_stream_queue.task_done()
+        print("Processed all audio chunks for this response.")
+        for _ in range(5):  # Send a few empty chunks to ensure playback finishes
+            audio_queue.put(b"")
+        while gemini_audio_stream_queue.unfinished_tasks > 0:
+            gemini_audio_stream_queue.task_done()
+        audio_done_event.set()
 
 
 def playback_worker():
@@ -390,8 +406,11 @@ def main():
 
     text_done_event.wait()  # Wait for the text_worker to signal that it's done
     audio_done_event.wait()  # Wait for the audio_worker to signal that it's done
+    print("\x1b[1;37;49mExiting the chat...\x1b[0;0;0m")
     gemini_text_stream_queue.join()
+    print("DEBUG: gemini_text_stream_queue joined")
     gemini_audio_stream_queue.join()
+    print("DEBUG: gemini_audio_stream_queue joined")
     audio_queue.join()
     gemini_text_stream_queue.put(None)
     gemini_audio_stream_queue.put(None)
@@ -399,9 +418,9 @@ def main():
     text_thread.join()
     audio_thread.join()
     worker_thread.join()
-    print("\n")
+    print()
     print("\x1b[1;37;49mThank you for chatting with Alpha0! Goodbye!\x1b[0;0;0m")
-    print("\n")
+    print()
 
 
 if __name__ == "__main__":
