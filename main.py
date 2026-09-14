@@ -10,12 +10,49 @@ from dotenv import load_dotenv
 import pydub
 import pydub.playback
 import sounddevice as sd
+import random
 
 load_dotenv()
 
+DEBUG = True
+
+AGENT_NAME = "Alpha0"
+
+time_of_day = ["morning", "afternoon", "evening", "night"]
+day_of_week = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+]
+weather_conditions = ["sunny", "cloudy", "rainy", "stormy", "snowy", "windy"]
+
+contexts = [
+    "You are on working on a important project and you are feeling stressed and overwhelmed.",
+    "You are on a vacation to Hawaii and you are feeling the vibe and relaxed.",
+    "You are busy cooking a meal for your family and you do not want to be interrupted.",
+]
+
+
+def get_complete_context():
+    time = random.choice(time_of_day)
+    day = random.choice(day_of_week)
+    weather = random.choice(weather_conditions)
+    context = f"It is a {time} on {day} and the weather is {weather}. You are in a {random.choice(contexts)}"
+    return context
+
+
+def debug(msg: str):
+    if DEBUG:
+        print(f"\x1b[0;3;90mDEBUG: {msg}\x1b[0;0;0m")
+
+
 MODEL = "gemini-3.1-flash-lite"
 
-state = "romantic"
+state = "happy"
 
 PREFERRED = [
     "Windows WASAPI",
@@ -33,11 +70,10 @@ for backend in PREFERRED:
 else:
     raise RuntimeError("No suitable audio backend")
 
-
 selected_device = sd.query_devices(device)
 
 
-print(f"Selected output device: {selected_device['name']} (Index: {device})")
+debug(f"Selected output device: {selected_device['name']} (Index: {device})")
 
 
 def adjust_emotion(p_state: str):
@@ -50,6 +86,7 @@ def adjust_emotion(p_state: str):
 
     # This function would contain logic to adjust the emotional state of the robot.
     # print(f"=== Adjusting emotional state to: {state} ===")
+    debug(f"Adjusting emotional state to: {state}")
     return "OK"
 
 
@@ -64,14 +101,19 @@ Return 'OK' after calling the function adjust_emotion(state: str) to indicate th
 Neutral is NOT an possible emotional state. Only one word emotional states are valid.
 If you don't have enough information, just don't call the function adjust_emotion(state: str) and return 'OK'.
 The agent's emotional state must not be adjusted too far, adjust it subtly and naturally.
+
+Last 5 emotions: {emotions}
+Ensure that the emotional state doesn't change too drastically. Use the last 5 emotions to inform your decision.
 """
 
 
 internal_monologue_prompt = """
-You are the internal monologue of an emotional human. Current emotional state: {state}.
+You are the internal monologue of an emotional human. Current emotional state: {state}. 
+What are you doing right now: {context}
 
 You narrate your internal thoughts and feelings in a subtle and natural way.
 You are not conversing with the user, you are conversing with yourself.
+Be confident and assertive in your internal monologue, but not arrogant or overbearing.
 
 Interpret what the user meant, use the context of the conversation and think.
 You may express your emotions, your thoughts, your feelings, your desires, your fears, your hopes, your dreams, your regrets, your memories,
@@ -81,7 +123,7 @@ This is more of a stream of consciousness than a structured response.
 Your goal is not to sound emotional. Your goal is to think emotionally.
 No flowery language or poetic expressions. Keep it simple and natural.
 
-Don't overthink, keep things simple and natural. 
+Don't overthink, keep things simple and natural.
 
 Keep your responses short and concise. You are a HUMAN. 
 Humans cope with emotions in different ways. Sometimes they seek comfort, sometimes they joke, sometimes they avoid the topic, sometimes they ask questions, sometimes they become quiet, and sometimes they set boundaries. 
@@ -89,6 +131,10 @@ Do not default to pushing people away.
 
 You may end your responses with <end-of-monologue> to indicate the end of your internal monologue.
 If you do not end your response with <end-of-monologue>, you will be prompted to continue narrating your internal thoughts and feelings.
+
+You are chatting with {user_name}. 
+
+Last 5 emotions: {emotions}
 """
 
 reflective_prompt = """
@@ -121,7 +167,7 @@ def text_worker():
             break
         if chunk == "<-- BEGIN -->":
             text_done_event.clear()
-            print("\x1b[1;95;49mAlpha0>:\x1b[0;95;49m", end=" ", flush=True)
+            print(f"\x1b[1;95;49m{AGENT_NAME}>:\x1b[0;95;49m", end=" ", flush=True)
             gemini_text_stream_queue.task_done()
             continue
         if chunk == "<-- END -->":
@@ -208,14 +254,16 @@ def audio_worker():
                     frame_rate=24000,
                     channels=1,
                 )
-                audio_segment = audio_segment.set_frame_rate(48000).set_channels(2)
+                audio_segment = audio_segment.set_frame_rate(
+                    int(selected_device["default_samplerate"])
+                ).set_channels(int(selected_device["max_output_channels"]))
                 audio_queue.put(audio_segment.raw_data)
                 # print(
                 #     "\nDEBUG: audio_worker send audio qsize:",
                 #     audio_queue.qsize(),
                 #     "size: ",
                 #     len(audio_chunk.audio_content),
-        print("Processed all audio chunks for this response.")
+        debug("Processed all audio chunks for this response.")
         for _ in range(5):  # Send a few empty chunks to ensure playback finishes
             audio_queue.put(b"")
         while gemini_audio_stream_queue.unfinished_tasks > 0:
@@ -228,8 +276,8 @@ def playback_worker():
     # Open the stream context ONCE
     with sd.RawOutputStream(
         device=device,
-        samplerate=48000,
-        channels=2,
+        samplerate=selected_device["default_samplerate"],
+        channels=selected_device["max_output_channels"],
         dtype="int16",
         latency="high",
         blocksize=4096,
@@ -241,7 +289,7 @@ def playback_worker():
             if chunk is None:
                 break
             # buff.append(chunk)
-            # print("\nDEBUG: playback_worker got chunk, qsize:", audio_queue.qsize())
+            # debug("playback_worker got chunk, qsize:", audio_queue.qsize())
             # if len(buff) < 5:
             #     continue
             # chunk = b"".join(buff)
@@ -262,10 +310,17 @@ def main():
     print(
         "\x1b[1;37;49m=============================================================\x1b[0;0;0m"
     )
-    print()
-    print("\x1b[1;37;49mYou are now chatting with \x1b[1;95;49mAlpha0\x1b[0;0;0m")
-    print()
+
     messages = []
+    felt_emotions = [state]
+    name = input("\x1b[1;37;49mEnter your name:\x1b[0;0;0m ")
+    messages.append({"role": "system", "parts": [f"User's name is {name}."]})
+
+    print()
+    print(
+        f"\x1b[1;37;49mYou are now chatting with \x1b[1;95;49m{AGENT_NAME}\x1b[0;0;0m"
+    )
+    print()
 
     text_thread = threading.Thread(target=text_worker, daemon=True)
     text_thread.start()
@@ -274,21 +329,38 @@ def main():
     worker_thread = threading.Thread(target=playback_worker, daemon=True)
     worker_thread.start()
 
+    context = get_complete_context()
+    debug(f"Context: {context}")
+
     user_exit = False
+    initial_chat = True
     while not user_exit:
         text_done_event.clear()
         audio_done_event.clear()
 
-        try:
-            user_input = input("\x1b[1;37;49mYou>:\x1b[0;0;0m ")
-        except KeyboardInterrupt:
-            user_input = "I'm exiting the chat. Goodbye!"
-            print(user_input)
-            user_exit = True
+        if initial_chat == True:
+            user_input = "{name} is starting the chat. Hello {AGENT_NAME}!"
+        else:
+            try:
+                user_input = input(f"\x1b[1;37;49m{name}>:\x1b[0;0;0m ")
+            except KeyboardInterrupt:
+                user_input = "I'm exiting the chat. Goodbye!"
+                print(user_input)
+                user_exit = True
+            initial_chat = False
 
-        messages.append({"role": "user", "parts": [user_input]})
+        if initial_chat:
+            messages.append({"role": "system", "parts": [user_input]})
+            initial_chat = False
+        else:
+            messages.append({"role": "user", "parts": [user_input]})
 
-        internal_monologue = internal_monologue_prompt.format(state=state)
+        internal_monologue = internal_monologue_prompt.format(
+            state=state,
+            emotions=", ".join(felt_emotions[-5:]),
+            user_name=name,
+            context=context,
+        )
 
         internal_monologue_res = client.models.generate_content_stream(
             model=MODEL,
@@ -335,7 +407,9 @@ def main():
         emotion_res = client.models.generate_content(
             model=MODEL,
             contents=[
-                emotion_detector_prompt.format(state=state),
+                emotion_detector_prompt.format(
+                    state=state, emotions=", ".join(felt_emotions[-5:])
+                ),
                 monologue_text,
                 # reflective_res.text,
                 f"User input: {user_input}",
@@ -348,12 +422,15 @@ def main():
         if emotion_res and emotion_res.text != "OK":
             print("Emotion Detector>:", emotion_res.text)
 
+        felt_emotions.append(state)
+
         res = client.models.generate_content_stream(
             model=MODEL,
             contents=[
-                "You are Alpha0. A highly intelligent human working at a software company. Aged 20.",
-                f"Current emotional state: {state}."
-                "You need not narrate the scene or the environment. Keep it subtle and natural. You are a human, not a robot. You are not an AI language model."
+                f"You are {AGENT_NAME}. A highly intelligent human. You call yourself {AGENT_NAME}. Aged 20. Currently you are in a {context}.",
+                f"Current emotional state: {state}.",
+                f"You are chatting with a human named {name}.",
+                "You need not narrate the scene or the environment. Keep it subtle and natural. You are a human, not a robot. You are not an AI language model.",
                 "Keep your responses short and concise. You are a HUMAN.",
                 "Be simple and natural in your responses. No flowery language or poetic expressions. Keep it simple and natural.",
                 "Don't just repeat your internal monologue. Use them to inform your response, but don't just repeat them. You are chatting so keep your responses conversational and concise. This is the user facing response, keep it concise.",
@@ -387,7 +464,7 @@ def main():
         # gemini_text_stream_queue.put(text_stream)
         # gemini_audio_stream_queue.put(audio_stream)
 
-        # print("\x1b[1;95;49mAlpha0>:\x1b[0;95;49m", end=" ", flush=True)
+        # print(f"\x1b[1;95;49m{AGENT_NAME}>:\x1b[0;95;49m", end=" ", flush=True)
         # for chunk in text_stream:
         #     if chunk.text:
         #         chunk_text = chunk.text
@@ -408,9 +485,9 @@ def main():
     audio_done_event.wait()  # Wait for the audio_worker to signal that it's done
     print("\x1b[1;37;49mExiting the chat...\x1b[0;0;0m")
     gemini_text_stream_queue.join()
-    print("DEBUG: gemini_text_stream_queue joined")
+    debug("gemini_text_stream_queue joined")
     gemini_audio_stream_queue.join()
-    print("DEBUG: gemini_audio_stream_queue joined")
+    debug("gemini_audio_stream_queue joined")
     audio_queue.join()
     gemini_text_stream_queue.put(None)
     gemini_audio_stream_queue.put(None)
@@ -419,7 +496,7 @@ def main():
     audio_thread.join()
     worker_thread.join()
     print()
-    print("\x1b[1;37;49mThank you for chatting with Alpha0! Goodbye!\x1b[0;0;0m")
+    print(f"\x1b[1;37;49mThank you for chatting with {AGENT_NAME}! Goodbye!\x1b[0;0;0m")
     print()
 
 
