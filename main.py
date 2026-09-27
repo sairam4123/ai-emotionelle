@@ -84,6 +84,7 @@ debug(f"Selected output device: {selected_device['name']} (Index: {device})")
 
 router = laya.Router()
 
+
 def adjust_emotion(p_state: str):
     global state
     if state == p_state:
@@ -154,6 +155,7 @@ Keep it concise and short. You are a HUMAN. You may end your responses with <end
 
 MEMORY = {}
 
+
 def load_memory():
     global MEMORY
     debug("Loading memory from memory.json...")
@@ -162,6 +164,7 @@ def load_memory():
             MEMORY = json.load(f)
     except FileNotFoundError:
         MEMORY = {}
+
 
 def get_google_creds():
     import json
@@ -321,28 +324,27 @@ def playback_worker():
 def msg_context_builder(messages, query):
     msg_included = []
     for i, msg in enumerate(messages):
-        res = router.predict(state=f"""
-    This is a message from the {msg['role']}: {msg['parts'][0]}.
-    It is the {i+1}th message in the conversation. 
+        res = router.predict(
+            state=f"""
+    This is a message from the {msg["role"]}: {msg["parts"][0]}.
+    It is the {i + 1}th message in the conversation. 
 
     The query is: {query}
 
     Surrounding messages are:
-    {''.join([f"{m['role'].capitalize()}: {m['parts'][0]}\n" for m in messages[max(0, i-2):i+3]])}
-""", questions={
-    "relevance": {
-        "type": "noul",
-        "instructions": "Determine if the message is relevant to the query.",
-    },
-})
-        print(res["answers"]["relevance"])
+    {"".join([f"{m['role'].capitalize()}: {m['parts'][0]}\n" for m in messages[max(0, i - 2) : i + 3]])}
+""",
+            questions={
+                "relevance": {
+                    "type": "noul",
+                    "instructions": "Determine if the message is relevant to the query.",
+                },
+            },
+        )
         if res["answers"]["relevance"]["noul"] > 0.5:
             msg_included.append(msg)
-        
 
-    
     return msg_included
-
 
 
 def main():
@@ -364,7 +366,14 @@ def main():
         name = MEMORY["user_name"]
     else:
         name = input("\x1b[1;37;49mEnter your name:\x1b[0;0;0m ")
-    messages.append({"role": "system", "parts": [f"User's name is {name}. Your last thought about the user was: {MEMORY.get('internal_monologue', 'No previous thoughts.')}"]})
+    messages.append(
+        {
+            "role": "system",
+            "parts": [
+                f"User's name is {name}. Your last thought about the user was: {MEMORY.get('internal_monologue', 'No previous thoughts.')}"
+            ],
+        }
+    )
 
     print()
     print(
@@ -526,14 +535,13 @@ def main():
 
         messages.append({"role": "assistant", "parts": [chatbot_response_text]})
 
-
     thought_about_user = client.models.generate_content(
         model=MODEL,
         contents=[
             f"You are {AGENT_NAME}. A highly intelligent human. You call yourself {AGENT_NAME}. Aged 20. Currently you are in a {background}.",
             "What did you think about the user in this conversation? What did you learn about them? What are your thoughts and feelings about them?",
             "Keep your responses short and concise. You are a HUMAN.",
-            f"Context: {msg_context_builder(messages, "What did you think about the user in this conversation? What did you learn about them? What are your thoughts and feelings about them?")}",
+            f"Context: {msg_context_builder(messages, 'What did you think about the user in this conversation? What did you learn about them? What are your thoughts and feelings about them?')}",
         ],
     )
     # Memory
@@ -545,8 +553,8 @@ def main():
     memory_file = "memory.json"
     with open(memory_file, "w") as f:
         import json
-        json.dump(memory, f, indent=4)
 
+        json.dump(memory, f, indent=4)
 
     text_done_event.wait()  # Wait for the text_worker to signal that it's done
     audio_done_event.wait()  # Wait for the audio_worker to signal that it's done
