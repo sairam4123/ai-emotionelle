@@ -1,5 +1,6 @@
 import io
 import itertools
+import json
 import queue
 import threading
 import time
@@ -11,6 +12,8 @@ import pydub
 import pydub.playback
 import sounddevice as sd
 import random
+
+import laya
 
 load_dotenv()
 
@@ -37,7 +40,7 @@ contexts = [
 ]
 
 
-def get_complete_context():
+def assemble_background_info():
     time = random.choice(time_of_day)
     day = random.choice(day_of_week)
     weather = random.choice(weather_conditions)
@@ -55,12 +58,16 @@ MODEL = "gemini-3.1-flash-lite"
 state = "happy"
 
 PREFERRED = [
+    "Core Audio",
     "Windows WASAPI",
     "Windows DirectSound",
     "MME",
 ]
 
 apis = sd.query_hostapis()
+print("Available audio backends:")
+for api in apis:
+    print(f" - {api['name']}")
 
 for backend in PREFERRED:
     api = next((a for a in apis if a["name"] == backend), None)
@@ -75,6 +82,7 @@ selected_device = sd.query_devices(device)
 
 debug(f"Selected output device: {selected_device['name']} (Index: {device})")
 
+router = laya.Router()
 
 def adjust_emotion(p_state: str):
     global state
@@ -143,6 +151,17 @@ You reflect on your internal monologue and the user's input, and you narrate you
 Keep it concise and short. You are a HUMAN. You may end your responses with <end-of-reflection> to indicate the end of your reflective thoughts.
 """
 
+
+MEMORY = {}
+
+def load_memory():
+    global MEMORY
+    debug("Loading memory from memory.json...")
+    try:
+        with open("memory.json", "r") as f:
+            MEMORY = json.load(f)
+    except FileNotFoundError:
+        MEMORY = {}
 
 def get_google_creds():
     import json
@@ -299,6 +318,33 @@ def playback_worker():
             audio_queue.task_done()
 
 
+def msg_context_builder(messages, query):
+    msg_included = []
+    for i, msg in enumerate(messages):
+        res = router.predict(state=f"""
+    This is a message from the {msg['role']}: {msg['parts'][0]}.
+    It is the {i+1}th message in the conversation. 
+
+    The query is: {query}
+
+    Surrounding messages are:
+    {''.join([f"{m['role'].capitalize()}: {m['parts'][0]}\n" for m in messages[max(0, i-2):i+3]])}
+""", questions={
+    "relevance": {
+        "type": "noul",
+        "instructions": "Determine if the message is relevant to the query.",
+    },
+})
+        print(res["answers"]["relevance"])
+        if res["answers"]["relevance"]["noul"] > 0.5:
+            msg_included.append(msg)
+        
+
+    
+    return msg_included
+
+
+
 def main():
     client = genai.Client()
     print(
@@ -310,11 +356,15 @@ def main():
     print(
         "\x1b[1;37;49m=============================================================\x1b[0;0;0m"
     )
+    load_memory()
 
     messages = []
     felt_emotions = [state]
-    name = input("\x1b[1;37;49mEnter your name:\x1b[0;0;0m ")
-    messages.append({"role": "system", "parts": [f"User's name is {name}."]})
+    if MEMORY.get("user_name"):
+        name = MEMORY["user_name"]
+    else:
+        name = input("\x1b[1;37;49mEnter your name:\x1b[0;0;0m ")
+    messages.append({"role": "system", "parts": [f"User's name is {name}. Your last thought about the user was: {MEMORY.get('internal_monologue', 'No previous thoughts.')}"]})
 
     print()
     print(
@@ -329,8 +379,8 @@ def main():
     worker_thread = threading.Thread(target=playback_worker, daemon=True)
     worker_thread.start()
 
-    context = get_complete_context()
-    debug(f"Context: {context}")
+    background = assemble_background_info()
+    debug(f"Context: {background}")
 
     user_exit = False
     initial_chat = True
@@ -359,19 +409,14 @@ def main():
             state=state,
             emotions=", ".join(felt_emotions[-5:]),
             user_name=name,
-            context=context,
+            context=background,
         )
 
         internal_monologue_res = client.models.generate_content_stream(
             model=MODEL,
             contents=[
                 internal_monologue,
-                "".join(
-                    [
-                        f"{msg['role'].capitalize()}: {msg['parts'][0]}"
-                        for msg in messages[-10:]
-                    ]
-                ),  # Include the last 10 messages in the context
+                f"Context: {msg_context_builder(messages, user_input)}",
                 f"User input: {user_input}",
             ],
         )
@@ -427,7 +472,7 @@ def main():
         res = client.models.generate_content_stream(
             model=MODEL,
             contents=[
-                f"You are {AGENT_NAME}. A highly intelligent human. You call yourself {AGENT_NAME}. Aged 20. Currently you are in a {context}.",
+                f"You are {AGENT_NAME}. A highly intelligent human. You call yourself {AGENT_NAME}. Aged 20. Currently you are in a {background}.",
                 f"Current emotional state: {state}.",
                 f"You are chatting with a human named {name}.",
                 "You need not narrate the scene or the environment. Keep it subtle and natural. You are a human, not a robot. You are not an AI language model.",
@@ -480,6 +525,28 @@ def main():
         #     pydub.playback.play(seg)
 
         messages.append({"role": "assistant", "parts": [chatbot_response_text]})
+
+
+    thought_about_user = client.models.generate_content(
+        model=MODEL,
+        contents=[
+            f"You are {AGENT_NAME}. A highly intelligent human. You call yourself {AGENT_NAME}. Aged 20. Currently you are in a {background}.",
+            "What did you think about the user in this conversation? What did you learn about them? What are your thoughts and feelings about them?",
+            "Keep your responses short and concise. You are a HUMAN.",
+            f"Context: {msg_context_builder(messages, "What did you think about the user in this conversation? What did you learn about them? What are your thoughts and feelings about them?")}",
+        ],
+    )
+    # Memory
+    memory = {
+        "user_name": name,
+        "conversation_history": messages,
+        "internal_monologue": thought_about_user.text,
+    }
+    memory_file = "memory.json"
+    with open(memory_file, "w") as f:
+        import json
+        json.dump(memory, f, indent=4)
+
 
     text_done_event.wait()  # Wait for the text_worker to signal that it's done
     audio_done_event.wait()  # Wait for the audio_worker to signal that it's done

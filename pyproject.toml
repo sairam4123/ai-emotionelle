@@ -8,6 +8,7 @@ dependencies = [
     "audioop-lts>=0.2.2",
     "google-cloud-texttospeech>=2.37.0",
     "google-genai>=2.11.0",
+    "laya>=0.3.20",
     "numpy>=2.5.1",
     "pydub>=0.25.1",
     "python-dotenv>=1.2.2",
